@@ -87,10 +87,17 @@ def inference(net, x, device, flip=False, rotate=[], visualize=False,
     else:
         vis_out = None
 
+    # 保存原始的y_bon_用于返回
+
+
     y_bon_ = (y_bon_[0] / np.pi + 0.5) * H - 0.5
     y_bon_[0] = np.clip(y_bon_[0], 1, H/2-1)
     y_bon_[1] = np.clip(y_bon_[1], H/2+1, H-2)
     y_cor_ = y_cor_[0, 0]
+
+    original_y_bon = y_bon_.copy()
+
+
 
     # Init floor/ceil plane
     z0 = 50
@@ -138,86 +145,83 @@ def inference(net, x, device, flip=False, rotate=[], visualize=False,
     cor_id[:, 0] /= W
     cor_id[:, 1] /= H
 
-    return cor_id, z0, z1, vis_out
+    return cor_id, z0, z1, vis_out, original_y_bon
 
 
-if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--pth', required=True,
-                        help='path to load saved checkpoint.')
-    parser.add_argument('--img_glob', required=True,
-                        help='NOTE: Remeber to quote your glob path. '
-                             'All the given images are assumed to be aligned'
-                             'or you should use preporcess.py to do so.')
-    parser.add_argument('--output_dir', required=True)
-    parser.add_argument('--visualize', action='store_true')
-    # Augmentation related
-    parser.add_argument('--flip', action='store_true',
-                        help='whether to perfome left-right flip. '
-                             '# of input x2.')
-    parser.add_argument('--rotate', nargs='*', default=[], type=float,
-                        help='whether to perfome horizontal rotate. '
-                             'each elements indicate fraction of image width. '
-                             '# of input xlen(rotate).')
-    # Post-processing realted
-    parser.add_argument('--r', default=0.05, type=float)
-    parser.add_argument('--min_v', default=None, type=float)
-    parser.add_argument('--force_cuboid', action='store_true')
-    parser.add_argument('--force_raw', action='store_true')
-    # Misc arguments
-    parser.add_argument('--no_cuda', action='store_true',
-                        help='disable cuda')
-    args = parser.parse_args()
-
-    # Prepare image to processed
-    paths = sorted(glob.glob(args.img_glob))
+def main(pth, img_glob, output_dir, visualize=False, flip=False, rotate=[], 
+         r=0.05, min_v=None, force_cuboid=False, force_raw=False, no_cuda=False):
+    """
+    参数说明:
+    pth: str - 模型检查点路径
+    img_glob: str - 输入图像路径（支持glob模式）
+    output_dir: str - 输出目录路径
+    visualize: bool - 是否可视化
+    flip: bool - 是否进行左右翻转增强
+    rotate: list[float] - 水平旋转增强的比例列表
+    r: float - 后处理相关参数
+    min_v: float - 后处理相关参数
+    force_cuboid: bool - 是否强制立方体布局
+    force_raw: bool - 是否输出原始多边形
+    no_cuda: bool - 是否禁用CUDA
+    """
+    # 准备要处理的图像
+    paths = sorted(glob.glob(img_glob))
     if len(paths) == 0:
         print('no images found')
     for path in paths:
         assert os.path.isfile(path), '%s not found' % path
 
-    # Check target directory
-    if not os.path.isdir(args.output_dir):
-        print('Output directory %s not existed. Create one.' % args.output_dir)
-        os.makedirs(args.output_dir)
-    device = torch.device('cpu' if args.no_cuda else 'cuda')
+    # 检查目标目录
+    if not os.path.isdir(output_dir):
+        print('Output directory %s not existed. Create one.' % output_dir)
+        os.makedirs(output_dir)
+    device = torch.device('cpu' if no_cuda else 'cuda')
 
-    # Loaded trained model
-    net = utils.load_trained_model(HorizonNet, args.pth).to(device)
+    # 加载训练好的模型
+    net = utils.load_trained_model(HorizonNet, pth).to(device)
     net.eval()
 
-    # Inferencing
+    # 推理
     with torch.no_grad():
         for i_path in tqdm(paths, desc='Inferencing'):
             k = os.path.split(i_path)[-1][:-4]
 
-            # Load image
+            # 加载图像
             img_pil = Image.open(i_path)
             if img_pil.size != (1024, 512):
                 img_pil = img_pil.resize((1024, 512), Image.BICUBIC)
             img_ori = np.array(img_pil)[..., :3].transpose([2, 0, 1]).copy()
             x = torch.FloatTensor([img_ori / 255])
 
-            # Inferenceing corners
-            cor_id, z0, z1, vis_out = inference(net=net, x=x, device=device,
-                                                flip=args.flip, rotate=args.rotate,
-                                                visualize=args.visualize,
-                                                force_cuboid=args.force_cuboid,
-                                                force_raw=args.force_raw,
-                                                min_v=args.min_v, r=args.r)
+            # 推理角点
+            cor_id, z0, z1, vis_out, y_bon = inference(net=net, x=x, device=device,
+                                               flip=flip, rotate=rotate,
+                                               visualize=visualize,
+                                               force_cuboid=force_cuboid,
+                                               force_raw=force_raw,
+                                               min_v=min_v, r=r)
 
-            # Output result
-            with open(os.path.join(args.output_dir, k + '.json'), 'w') as f:
+            # 输出结果
+            with open(os.path.join(output_dir, k + '.json'), 'w') as f:
                 json.dump({
                     'z0': float(z0),
                     'z1': float(z1),
                     'uv': [[float(u), float(v)] for u, v in cor_id],
+                    'y_bon': y_bon.tolist(),
                 }, f)
 
             if vis_out is not None:
-                vis_path = os.path.join(args.output_dir, k + '.raw.png')
+                vis_path = os.path.join(output_dir, k + '.raw.png')
                 vh, vw = vis_out.shape[:2]
                 Image.fromarray(vis_out)\
                      .resize((vw//2, vh//2), Image.LANCZOS)\
                      .save(vis_path)
+
+if __name__ == '__main__':
+    # 示例用法
+    main(
+        pth='/home/jarvisai/HorizonNet/ckpt/resnet50_rnn__mp3d.pth',
+        img_glob='/home/jarvisai/HorizonNet/dataset/project001/output/*.png',
+        output_dir='/home/jarvisai/HorizonNet/dataset/project001/output/json',
+        visualize=True
+    )
